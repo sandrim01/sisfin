@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { generateAdvisorResponse } from '@/lib/ai-advisor';
 import { FinancialProfile, TransactionItem } from '@/lib/financial-engine';
 import { prisma } from '@/lib/prisma';
+import { ensureKnowledgeSeeded } from '@/app/api/knowledge/route';
 
 const DEFAULT_ADMIN_EMAIL = 'admin@sisfin.com.br';
 
@@ -22,22 +23,39 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Mensagem e perfil financeiro são obrigatórios.' }, { status: 400 });
     }
 
-    // Processa se há registro de transação natural (ex: "Gastei 50 no mercado")
-    const localResult = await generateAdvisorResponse(message, profile, transactions || []);
+    // Carrega os Playbooks / Regras ensinadas pelo Admin no banco PostgreSQL
+    const knowledgeRules = await ensureKnowledgeSeeded();
+
+    // Processa no motor especialista Sisfin (gastos naturais + playbooks treinados + cálculos matemáticos)
+    const localResult = await generateAdvisorResponse(
+      message,
+      profile,
+      transactions || [],
+      knowledgeRules
+    );
     let finalReply = localResult.reply;
 
-    // Se houver chave OPENAI_API_KEY configurada na Railway e não for apenas um lançamento rápido, enriquece via LLM
+    // Se houver chave OPENAI_API_KEY configurada na Railway, injeta todos os Playbooks treinados pelo Admin no System Prompt!
     const openAiKey = process.env.OPENAI_API_KEY;
     if (openAiKey && !localResult.addedTransaction) {
       try {
+        const rulesContext = knowledgeRules
+          .filter((r) => r.isActive)
+          .map((r) => `- [${r.title}] (Gatilhos: ${r.topicKeywords}): ${r.methodologyRule}`)
+          .join('\n');
+
         const systemPrompt = `Você é o Consultor Financeiro Pessoal do Sisfin, especialista em levar qualquer pessoa à Independência Financeira (FIRE) independentemente do salário atual.
-Dados atuais do usuário (${profile.name}):
+Dados reais atuais do usuário (${profile.name}):
 - Salário líquido mensal: R$ ${profile.monthlyIncome} (Dia do pagamento: ${profile.payday})
 - Custo fixo essencial: R$ ${profile.essentialFixedCosts}
 - Patrimônio já investido: R$ ${profile.currentInvested}
 - Dívidas totais: R$ ${profile.totalDebt} (Parcela mensal: R$ ${profile.monthlyDebtPayment})
 - Renda passiva desejada na aposentadoria: R$ ${profile.targetMonthlyIncome}/mês
-Responda de forma acolhedora, prática, direta e com cálculos reais em Reais (R$). Nunca julgue o salário do usuário; mostre sempre o próximo passo prático.`;
+
+REGRAS E PLAYBOOKS OFICIAIS TREINADOS PELO ADMINISTRADOR DO SISFIN (OBEDEÇA SEMPRE):
+${rulesContext}
+
+Responda de forma acolhedora, prática, direta e com cálculos reais em Reais (R$) adaptados ao salário do usuário.`;
 
         const aiRes = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
@@ -63,7 +81,7 @@ Responda de forma acolhedora, prática, direta e com cálculos reais em Reais (R
           }
         }
       } catch (err) {
-        console.error('Fallback para motor especialista local:', err);
+        console.error('Fallback para motor especialista local treinado:', err);
       }
     }
 
@@ -81,7 +99,9 @@ Responda de forma acolhedora, prática, direta e com cálculos reais em Reais (R
               userId: user.id,
               role: 'assistant',
               content: finalReply,
-              actionTag: localResult.addedTransaction ? 'TRANSACTION_ADDED' : null,
+              actionTag: localResult.addedTransaction
+                ? 'TRANSACTION_ADDED'
+                : localResult.matchedRuleTitle || null,
             },
           ],
         });
@@ -114,6 +134,7 @@ Responda de forma acolhedora, prática, direta e com cálculos reais em Reais (R
     return NextResponse.json({
       reply: finalReply,
       addedTransaction: localResult.addedTransaction,
+      matchedRuleTitle: localResult.matchedRuleTitle,
     });
   } catch (error) {
     console.error('Erro na API do Consultor:', error);

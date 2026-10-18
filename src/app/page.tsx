@@ -28,6 +28,8 @@ import {
   Database,
   Trash2,
   Save,
+  BookOpen,
+  BrainCircuit,
 } from 'lucide-react';
 import {
   FinancialProfile,
@@ -35,7 +37,7 @@ import {
   calculateFinancialDiagnosis,
   calculateMonthsToTarget,
 } from '@/lib/financial-engine';
-import { parseBankStatementFile, categorizeDescription } from '@/lib/ai-advisor';
+import { parseBankStatementFile, categorizeDescription, KnowledgeRuleItem } from '@/lib/ai-advisor';
 
 const INITIAL_PROFILE: FinancialProfile = {
   name: 'Sandrim (Admin & Cobaia #01)',
@@ -81,17 +83,31 @@ export default function SisfinApp() {
   const [importFeedback, setImportFeedback] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Estado do Estúdio de Treinamento da IA (Admin Playbooks)
+  const [knowledgeRules, setKnowledgeRules] = useState<KnowledgeRuleItem[]>([]);
+  const [ruleTitle, setRuleTitle] = useState('');
+  const [ruleKeywords, setRuleKeywords] = useState('');
+  const [ruleMethodology, setRuleMethodology] = useState('');
+  const [ruleFeedback, setRuleFeedback] = useState<string | null>(null);
+
   // Carrega dados reais do PostgreSQL na Railway ao iniciar
   useEffect(() => {
     async function loadFromPostgres() {
       try {
-        const res = await fetch('/api/state');
-        if (res.ok) {
-          const data = await res.json();
+        const [stateRes, knowRes] = await Promise.all([
+          fetch('/api/state'),
+          fetch('/api/knowledge'),
+        ]);
+        if (stateRes.ok) {
+          const data = await stateRes.json();
           if (data.profile) setProfile(data.profile);
           if (data.transactions) setTransactions(data.transactions);
           if (data.messages && data.messages.length > 0) setChatMessages(data.messages);
           setDbSynced(true);
+        }
+        if (knowRes.ok) {
+          const kData = await knowRes.json();
+          if (kData.rules) setKnowledgeRules(kData.rules);
         }
       } catch (err) {
         console.error('Erro ao sincronizar com PostgreSQL:', err);
@@ -117,6 +133,38 @@ export default function SisfinApp() {
     } finally {
       setIsSavingProfile(false);
     }
+  }
+
+  // Adicionar nova Regra/Playbook no Estúdio de Treinamento da IA
+  async function handleAddKnowledgeRule(e: React.FormEvent) {
+    e.preventDefault();
+    if (!ruleTitle.trim() || !ruleKeywords.trim() || !ruleMethodology.trim()) return;
+
+    const res = await fetch('/api/knowledge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: ruleTitle,
+        topicKeywords: ruleKeywords,
+        methodologyRule: ruleMethodology,
+      }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      setKnowledgeRules((prev) => [...prev, data.rule]);
+      setRuleTitle('');
+      setRuleKeywords('');
+      setRuleMethodology('');
+      setRuleFeedback('🧠 Novo Playbook ensinado e gravado no cérebro da IA na Railway!');
+      setTimeout(() => setRuleFeedback(null), 5000);
+    }
+  }
+
+  // Excluir Regra de Conhecimento
+  async function handleDeleteKnowledgeRule(id: string) {
+    setKnowledgeRules((prev) => prev.filter((r) => r.id !== id));
+    await fetch(`/api/knowledge?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
   // Diagnóstico calculado em tempo real
@@ -355,8 +403,8 @@ export default function SisfinApp() {
                   : 'text-amber-400/80 hover:text-amber-300'
               }`}
             >
-              <Crown className="w-4 h-4" />
-              <span>Admin & SaaS</span>
+              <BrainCircuit className="w-4 h-4" />
+              <span>Treinar IA & Admin</span>
             </button>
           </nav>
 
@@ -655,7 +703,7 @@ export default function SisfinApp() {
         {/* ABA 2: CONSULTOR VIRTUAL IA 24/7 */}
         {activeTab === 'advisor' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2 bg-slate-900/90 border border-slate-800 rounded-2xl flex flex-col h-[560px]">
+            <div className="lg:col-span-2 bg-slate-900/90 border border-slate-800 rounded-2xl flex flex-col h-[580px]">
               <div className="p-4 border-b border-slate-800 flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
                   <div className="w-9 h-9 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center">
@@ -664,10 +712,17 @@ export default function SisfinApp() {
                   <div>
                     <h2 className="text-sm font-bold text-white">Consultor Financeiro IA Sisfin</h2>
                     <p className="text-[11px] text-emerald-400">
-                      Sincronizado com PostgreSQL na Railway • Registra gastos por conversa
+                      Treinado com {knowledgeRules.length} Playbooks no PostgreSQL • Planeja sonhos e registra gastos
                     </p>
                   </div>
                 </div>
+                <button
+                  onClick={() => setActiveTab('saas_admin')}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:bg-amber-500/25 transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <BrainCircuit className="w-3.5 h-3.5" />
+                  <span>Ensinar Nova Regra à IA</span>
+                </button>
               </div>
 
               {/* Mensagens */}
@@ -698,7 +753,7 @@ export default function SisfinApp() {
                 {isSendingChat && (
                   <div className="text-xs text-slate-400 flex items-center gap-2">
                     <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-400" />
-                    Consultor analisando e gravando no banco...
+                    Consultor consultando Playbooks e calculando com seu salário...
                   </div>
                 )}
               </div>
@@ -712,7 +767,7 @@ export default function SisfinApp() {
                   type="text"
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
-                  placeholder='Ex: "Gastei 78,90 no mercado" ou "Posso comprar uma TV de R$ 1800?"'
+                  placeholder='Ex: "Preciso me organizar para comprar um carro de 45.000, como faço?"'
                   className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
                 />
                 <button
@@ -730,18 +785,19 @@ export default function SisfinApp() {
             <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 space-y-4">
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-emerald-400" />
-                Comandos Rápidos (Teste como Cobaia)
+                Perguntas & Sonhos (Teste a IA Treinada)
               </h3>
               <p className="text-xs text-slate-400">
-                Clique em qualquer exemplo abaixo para testar e salvar no banco da Railway:
+                Clique em qualquer pergunta abaixo para ver a IA usar os Playbooks treinados com o seu salário:
               </p>
               <div className="space-y-2.5">
                 {[
+                  'Preciso me organizar para comprar um carro de R$ 45.000, como faço?',
+                  'Quero comprar um apartamento de R$ 220.000, qual o plano para minha renda?',
+                  'Quero organizar uma viagem de férias de R$ 6.000 sem fazer dívida',
+                  'Estou com dívidas no cartão de crédito, como sair rápido?',
                   'Gastei 84,50 no supermercado hoje no pix',
                   'Investi 250 no Tesouro Selic para minha reserva',
-                  'Posso comprar um celular de R$ 2.100 esse mês?',
-                  'Me dê meu diagnóstico completo de Independência Financeira',
-                  'Paguei 110 de conta de luz',
                 ].map((sample, idx) => (
                   <button
                     key={idx}
@@ -1084,11 +1140,144 @@ export default function SisfinApp() {
           </div>
         )}
 
-        {/* ABA 5: PAINEL ADMIN & MOTOR SAAS (VENDA DE ASSINATURAS + WHATSAPP + RAILWAY) */}
+        {/* ABA 5: ESTÚDIO DE TREINAMENTO DA IA & ADMIN SAAS */}
         {activeTab === 'saas_admin' && (
           <div className="space-y-6">
+            {/* Estúdio de Treinamento da IA (Playbooks Personalizados) */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Status Railway & GitHub */}
+              {/* Formulário para ensinar nova regra à IA */}
+              <form
+                onSubmit={handleAddKnowledgeRule}
+                className="bg-slate-900/90 border border-amber-500/30 rounded-2xl p-5 space-y-4"
+              >
+                <div className="flex items-center gap-2">
+                  <BrainCircuit className="w-5 h-5 text-amber-400" />
+                  <div>
+                    <h3 className="text-sm font-bold text-white">
+                      Ensinar Novo Playbook à IA
+                    </h3>
+                    <p className="text-[11px] text-slate-400">
+                      Crie diretrizes para perguntas específicas dos usuários
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">
+                      Título do Playbook / Assunto
+                    </label>
+                    <input
+                      type="text"
+                      value={ruleTitle}
+                      onChange={(e) => setRuleTitle(e.target.value)}
+                      placeholder="Ex: Como planejar transição de carreira / Reserva PJ"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">
+                      Palavras-chave Gatilho (separadas por vírgula)
+                    </label>
+                    <input
+                      type="text"
+                      value={ruleKeywords}
+                      onChange={(e) => setRuleKeywords(e.target.value)}
+                      placeholder="Ex: abrir empresa, sair do clt, empreender, mei, pj"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">
+                      O que a IA deve ensinar e calcular? (Sua Metodologia)
+                    </label>
+                    <textarea
+                      rows={4}
+                      value={ruleMethodology}
+                      onChange={(e) => setRuleMethodology(e.target.value)}
+                      placeholder="Ex: Antes de pedir demissão ou abrir um negócio, acumule 12 meses de Custo Essencial na Reserva da Paz e separe as contas PF e PJ desde o dia 1..."
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs transition cursor-pointer"
+                  >
+                    Salvar no Cérebro da IA (PostgreSQL)
+                  </button>
+
+                  {ruleFeedback && (
+                    <p className="text-xs text-emerald-400 bg-emerald-500/10 p-2.5 rounded-lg border border-emerald-500/20">
+                      {ruleFeedback}
+                    </p>
+                  )}
+                </div>
+              </form>
+
+              {/* Lista de Playbooks Ativos no Cérebro da IA */}
+              <div className="lg:col-span-2 bg-slate-900/90 border border-slate-800 rounded-2xl p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <BookOpen className="w-4 h-4 text-emerald-400" />
+                    <h3 className="text-base font-bold text-white">
+                      Playbooks Ativos no Cérebro da IA ({knowledgeRules.length})
+                    </h3>
+                  </div>
+                  <span className="text-xs text-slate-400">
+                    Salvos no PostgreSQL da Railway
+                  </span>
+                </div>
+
+                <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+                  {knowledgeRules.map((rule) => (
+                    <div
+                      key={rule.id}
+                      className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <h4 className="text-sm font-bold text-emerald-400">{rule.title}</h4>
+                          <p className="text-[11px] text-amber-300/90 mt-0.5">
+                            <strong>Gatilhos:</strong> {rule.topicKeywords}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              setActiveTab('advisor');
+                              const firstKeyword = rule.topicKeywords.split(',')[0]?.trim() || 'isso';
+                              handleSendAdvisorMessage(
+                                undefined,
+                                `Preciso me organizar sobre ${firstKeyword}, como faço?`
+                              );
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 text-[11px] font-medium cursor-pointer"
+                          >
+                            Testar no Chat
+                          </button>
+                          <button
+                            onClick={() => handleDeleteKnowledgeRule(rule.id)}
+                            title="Remover Playbook"
+                            className="text-slate-600 hover:text-rose-400 transition cursor-pointer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-300 whitespace-pre-line leading-relaxed">
+                        {rule.methodologyRule}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Cards Inferiores: Infraestrutura Railway, WhatsApp e Planos SaaS */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 space-y-3">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-bold text-white flex items-center gap-2">
@@ -1115,7 +1304,6 @@ export default function SisfinApp() {
                 </div>
               </div>
 
-              {/* Webhook WhatsApp */}
               <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 space-y-3">
                 <h3 className="text-sm font-bold text-white flex items-center gap-2">
                   <Smartphone className="w-4 h-4 text-emerald-400" />
@@ -1129,7 +1317,6 @@ export default function SisfinApp() {
                 </div>
               </div>
 
-              {/* Controle de Mensalidade (Paywall SaaS) */}
               <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 space-y-3">
                 <h3 className="text-sm font-bold text-white flex items-center gap-2">
                   <Lock className="w-4 h-4 text-purple-400" />

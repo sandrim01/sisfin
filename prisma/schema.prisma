@@ -122,3 +122,14 @@ model AdvisorMessage {
   actionTag String?  // Ex: "TRANSACTION_ADDED", "BUDGET_REBALANCED"
   createdAt DateTime @default(now())
 }
+
+model AiKnowledgeRule {
+  id              String   @id @default(cuid())
+  title           String
+  topicKeywords   String   // Palavras-chave separadas por vírgula (ex: "carro, moto, veiculo, financiar")
+  methodologyRule String   // Regra/Playbook ensinado pelo Admin para a IA aplicar com os números do usuário
+  formulaHint     String?  // Dica de cálculo matemático (ex: "custo_manutencao_mensal = 0.02 * valor_bem")
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}

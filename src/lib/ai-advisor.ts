@@ -8,12 +8,30 @@ export interface ParsedQuickTransaction {
   potType: SmartPot['type'];
 }
 
+export interface KnowledgeRuleItem {
+  id: string;
+  title: string;
+  topicKeywords: string;
+  methodologyRule: string;
+  formulaHint?: string | null;
+  isActive: boolean;
+}
+
 /**
  * Classifica um texto natural de gasto ou receita em categoria e pote inteligente.
  * Ex: "Gastei 85,90 no mercado ontem" -> EXPENSE, Alimentação, ESSENTIAL
  */
 export function parseNaturalLanguageTransaction(text: string): ParsedQuickTransaction | null {
   const normalized = text.toLowerCase();
+
+  // Se for uma pergunta consultiva ou de planejamento ("preciso me organizar", "como faço", "quero comprar", "posso comprar"), NÃO é lançamento de gasto!
+  if (
+    /(preciso|organizar|planejar|como faco|como fazer|quero comprar|sonho|meta|posso|devo|vale a pena|sera que|simul|se eu|\?)/i.test(
+      normalized
+    )
+  ) {
+    return null;
+  }
 
   // Verifica se há comando ou verbo de transação + número
   const hasActionKeyword =
@@ -40,11 +58,6 @@ export function parseNaturalLanguageTransaction(text: string): ParsedQuickTransa
   }
 
   if (isNaN(amount) || amount <= 0 || amount > 1000000) {
-    return null;
-  }
-
-  // Se for uma pergunta de simulação ("posso comprar...", "vale a pena..."), não registra como gasto!
-  if (/(posso|devo|vale a pena|sera que|como faco|simul|se eu)/i.test(normalized)) {
     return null;
   }
 
@@ -97,7 +110,7 @@ export function categorizeDescription(desc: string): {
     return { type: 'EXPENSE', category: 'Custo Essencial', potType: 'ESSENTIAL' };
   }
 
-  if (/(curso|livro|faculdade|meta|viagem|notebook|conserto)/i.test(d)) {
+  if (/(curso|livro|faculdade|meta|viagem|notebook|conserto|carro|moto)/i.test(d)) {
     return { type: 'EXPENSE', category: 'Metas & Educação', potType: 'SHORT_GOAL' };
   }
 
@@ -150,7 +163,6 @@ export function parseBankStatementFile(content: string, filename: string): Trans
     const sep = lines[i].includes(';') ? ';' : ',';
     const cols = lines[i].split(sep).map((c) => c.replace(/^"|"$/g, '').trim());
     if (cols.length >= 2) {
-      // Procura coluna numérica e coluna de texto
       let amountVal = NaN;
       let descText = '';
       let dateStr = new Date().toISOString().slice(0, 10);
@@ -187,14 +199,56 @@ export function parseBankStatementFile(content: string, filename: string): Trans
   return results;
 }
 
+function normalizeStr(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
 /**
- * Gera a resposta consultiva do Assistente Financeiro (com suporte a LLM via API Key ou Motor Especialista Local)
+ * Encontra Playbooks treinados pelo Admin que batem com a dúvida do usuário
+ */
+export function findMatchingPlaybooks(
+  userMessage: string,
+  rules: KnowledgeRuleItem[]
+): KnowledgeRuleItem[] {
+  const normMsg = normalizeStr(userMessage);
+  const matched: { rule: KnowledgeRuleItem; score: number }[] = [];
+
+  for (const rule of rules) {
+    if (!rule.isActive) continue;
+    const keywords = rule.topicKeywords
+      .split(',')
+      .map((k) => normalizeStr(k.trim()))
+      .filter(Boolean);
+
+    let score = 0;
+    for (const kw of keywords) {
+      if (normMsg.includes(kw)) {
+        score += kw.includes(' ') ? 3 : 2;
+      }
+    }
+    if (score > 0) {
+      matched.push({ rule, score });
+    }
+  }
+
+  return matched.sort((a, b) => b.score - a.score).map((m) => m.rule);
+}
+
+/**
+ * Gera a resposta consultiva do Assistente Financeiro aplicando:
+ * 1) Lançamento natural de gastos
+ * 2) Playbooks treinados pelo Admin no banco PostgreSQL + Cálculos reais para o salário do usuário
+ * 3) Simulador de compra e diagnóstico FIRE
  */
 export async function generateAdvisorResponse(
   userMessage: string,
   profile: FinancialProfile,
-  transactions: TransactionItem[]
-): Promise<{ reply: string; addedTransaction?: ParsedQuickTransaction }> {
+  transactions: TransactionItem[],
+  knowledgeRules: KnowledgeRuleItem[] = []
+): Promise<{ reply: string; addedTransaction?: ParsedQuickTransaction; matchedRuleTitle?: string }> {
   // 1. Verifica se o usuário está lançando um gasto/receita/aporte por conversa natural
   const parsedTx = parseNaturalLanguageTransaction(userMessage);
   const diagnosis = calculateFinancialDiagnosis(profile, transactions);
@@ -229,7 +283,60 @@ export async function generateAdvisorResponse(
     };
   }
 
-  // 2. Perguntas de decisão de compra ("Posso comprar...?", "Vale a pena parcelar...?")
+  // 2. Verifica se a pergunta aciona algum Playbook treinado pelo Admin (ex: Carro, Casa, Viagem, Dívidas, Investir, ou qualquer regra nova que você ensinar!)
+  const matchedRules = findMatchingPlaybooks(userMessage, knowledgeRules);
+  const numberInQuestion = userMessage.match(/(?:r\$\s*)?(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d{4,}(?:,\d{1,2})?)/i);
+  const extractedGoalValue = numberInQuestion
+    ? parseFloat(numberInQuestion[1].replace(/\./g, '').replace(',', '.'))
+    : null;
+
+  if (matchedRules.length > 0) {
+    const topRule = matchedRules[0];
+    const shortGoalPot = diagnosis.smartPots.find((p) => p.type === 'SHORT_GOAL');
+    const lifestylePot = diagnosis.smartPots.find((p) => p.type === 'LIFESTYLE');
+    const monthlyGoalBudget =
+      (shortGoalPot?.targetAmount || Math.round(profile.monthlyIncome * 0.1)) +
+      Math.round((lifestylePot?.targetAmount || profile.monthlyIncome * 0.1) * 0.35);
+
+    // Cálculo personalizado caso seja Playbook de Carro/Moto
+    if (topRule.formulaHint === 'veiculo_2pct_manutencao') {
+      const carValue = extractedGoalValue || Math.round(profile.monthlyIncome * 8);
+      const hiddenMonthlyCost = Math.round(carValue * 0.018); // ~1.8% ao mês de IPVA, seguro, combustível e revisão
+      const idealDownPayment = Math.round(carValue * 0.5); // 50% de entrada estratégica
+      const monthsForDownPayment = Math.max(1, Math.ceil(idealDownPayment / Math.max(100, monthlyGoalBudget)));
+      const monthsForFullCash = Math.max(1, Math.ceil((carValue * 0.88) / Math.max(100, monthlyGoalBudget))); // 12% desconto à vista
+      const maxSafeInstallment = Math.round(profile.monthlyIncome * 0.15);
+
+      return {
+        matchedRuleTitle: topRule.title,
+        reply: `🚗 **Plano Estratégico Sisfin: ${topRule.title}**\n*(Personalizado para seu salário de R$ ${profile.monthlyIncome.toLocaleString('pt-BR')}/mês)*\n\n📚 **Diretriz da Metodologia Sisfin:**\n${topRule.methodologyRule}\n\n---\n### 🔢 Simulação Matemática para um Veículo de **R$ ${carValue.toLocaleString('pt-BR')}**:\n\n1. **Alerta do Custo Invisível Mensal:**\n   Um veículo de R$ ${carValue.toLocaleString('pt-BR')} gera cerca de **R$ ${hiddenMonthlyCost.toLocaleString('pt-BR')}/mês** extras (combustível, seguro, IPVA rateado e manutenção). Hoje seu Custo Essencial é R$ ${profile.essentialFixedCosts.toLocaleString('pt-BR')} — com o veículo passará para **R$ ${(profile.essentialFixedCosts + hiddenMonthlyCost).toLocaleString('pt-BR')}/mês**.\n\n2. **Caminho A — Compra Inteligente à Vista (Com ~12% de Desconto):**\n   - Separando **R$ ${monthlyGoalBudget.toLocaleString('pt-BR')}/mês** (seu Pote de Metas + 35% do Lazer) rendendo 100% do CDI, você acumula o valor em cerca de **${monthsForFullCash} meses** sem pagar 1 centavo de juros ao banco.\n\n3. **Caminho B — Entrada Forte de 50% (R$ ${idealDownPayment.toLocaleString('pt-BR')}) + Parcela Segura:**\n   - Junte os R$ ${idealDownPayment.toLocaleString('pt-BR')} em **${monthsForDownPayment} meses**.\n   - A parcela restante jamais deve passar de 15% da sua renda (**máximo de R$ ${maxSafeInstallment.toLocaleString('pt-BR')}/mês**), mantendo seu aporte sagrado de **R$ ${diagnosis.payYourselfFirstAmount}/mês** da Independência Financeira intocado!`,
+      };
+    }
+
+    // Cálculo personalizado caso seja Playbook de Imóvel / Casa / Apartamento
+    if (topRule.formulaHint === 'imovel_25pct_entrada') {
+      const propertyValue = extractedGoalValue || Math.round(profile.monthlyIncome * 45);
+      const downPayment25 = Math.round(propertyValue * 0.25); // 20% entrada + 5% ITBI/cartório
+      const maxSafeMortgage = Math.round(profile.monthlyIncome * 0.28);
+      const monthsToSaveEntry = Math.max(1, Math.ceil(downPayment25 / Math.max(150, monthlyGoalBudget)));
+
+      return {
+        matchedRuleTitle: topRule.title,
+        reply: `🏠 **Plano Estratégico Sisfin: ${topRule.title}**\n*(Personalizado para seu salário de R$ ${profile.monthlyIncome.toLocaleString('pt-BR')}/mês)*\n\n📚 **Diretriz da Metodologia Sisfin:**\n${topRule.methodologyRule}\n\n---\n### 🔢 Simulação para Imóvel de **R$ ${propertyValue.toLocaleString('pt-BR')}**:\n- **Meta da Entrada + Documentação (25%):** R$ ${downPayment25.toLocaleString('pt-BR')}\n- **Quanto guardar por mês:** R$ ${monthlyGoalBudget.toLocaleString('pt-BR')}/mês (Prazo estimado para a entrada: **${monthsToSaveEntry} meses** acelerado pelos juros do CDI).\n- **Teto Seguro de Parcela para seu Salário:** Máximo de **R$ ${maxSafeMortgage.toLocaleString('pt-BR')}/mês** (28% da renda líquida).`,
+      };
+    }
+
+    // Qualquer outro Playbook (Viagem, Casamento, Dívidas, Investimentos ou Novas Regras criadas por você no Admin!)
+    const targetAmount = extractedGoalValue || Math.round(profile.monthlyIncome * 3);
+    const monthsRequired = Math.max(1, Math.ceil(targetAmount / Math.max(100, monthlyGoalBudget)));
+
+    return {
+      matchedRuleTitle: topRule.title,
+      reply: `🎯 **Consultoria Treinada Sisfin: ${topRule.title}**\n*(Calculado para sua renda de R$ ${profile.monthlyIncome.toLocaleString('pt-BR')}/mês)*\n\n📚 **Nossa Metodologia:**\n${topRule.methodologyRule}\n\n---\n### 🛠️ Passo a Passo Prático nos seus Potes:\n- **Capacidade Mensal para Metas Hoje:** **R$ ${monthlyGoalBudget.toLocaleString('pt-BR')}/mês** (sem prejudicar seu Pote da Liberdade Financeira de R$ ${diagnosis.payYourselfFirstAmount}/mês).\n- **Simulação de Meta (R$ ${targetAmount.toLocaleString('pt-BR')}):** Guardando esse valor todo dia ${profile.payday} em um CDB 100% CDI / Tesouro Selic, você conquista essa meta à vista em **${monthsRequired} meses**!`,
+    };
+  }
+
+  // 3. Perguntas de decisão rápida de compra ("Posso comprar...?", "Vale a pena parcelar...?")
   const buyMatch = userMessage.match(/(?:r\$\s*)?(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:\.\d{1,2})?)/i);
   if (/(posso comprar|vale a pena|parcelar|comprar um|cabe no orcamento)/i.test(userMessage) && buyMatch) {
     const itemPrice = parseFloat(buyMatch[1].replace(/\./g, '').replace(',', '.'));
@@ -237,7 +344,7 @@ export async function generateAdvisorResponse(
     const availableLifestyle = lifestylePot ? Math.max(0, lifestylePot.targetAmount - lifestylePot.spentAmount) : 0;
 
     return {
-      reply: `🧐 **Análise Sincera do seu Consultor Financeiro:**\n\nVocê perguntou sobre uma compra de **R$ ${itemPrice.toLocaleString('pt-BR')}** ganhando atualmente **R$ ${profile.monthlyIncome.toLocaleString('pt-BR')}/mês**.\n\n1. **Impacto no Pote de Qualidade de Vida:** Hoje você tem **R$ ${availableLifestyle.toFixed(2)}** livres neste mês sem tocar no seu pote sagrado de Independência Financeira.\n2. **Custo em Horas/Meses de Liberdade:** R$ ${itemPrice.toLocaleString('pt-BR')} equivalem a **${(itemPrice / diagnosis.recommendedMonthlyInvestment).toFixed(1)} meses** de aportes do seu plano de liberdade.\n3. **Veredito Prático:** ${
+      reply: `🧐 **Análise Sincera do seu Consultor Financeiro:**\n\nVocê perguntou sobre uma compra de **R$ ${itemPrice.toLocaleString('pt-BR')}** ganhando atualmente **R$ ${profile.monthlyIncome.toLocaleString('pt-BR')}/mês**.\n\n1. **Impacto no Pote de Qualidade de Vida:** Hoje você tem **R$ ${availableLifestyle.toFixed(2)}** livres neste mês sem tocar no seu pote sagrado de Independência Financeira.\n2. **Custo em Meses de Liberdade:** R$ ${itemPrice.toLocaleString('pt-BR')} equivalem a **${(itemPrice / diagnosis.recommendedMonthlyInvestment).toFixed(1)} meses** de aportes do seu plano de liberdade.\n3. **Veredito Prático:** ${
         itemPrice <= availableLifestyle
           ? '✅ **Cabe no orçamento à vista!** Se tiver desconto no PIX, aproveite sem culpa.'
           : `⏳ **Recomendação Estratégica:** Não comprometa seu limite agora. Crie uma meta de **${Math.ceil(itemPrice / Math.max(50, availableLifestyle * 0.6))} meses** no pote de *Metas de Curto Prazo* guardando R$ ${Math.round(itemPrice / 4)}/mês. Assim você compra à vista com desconto e não atrasa sua Independência Financeira!`
@@ -245,8 +352,8 @@ export async function generateAdvisorResponse(
     };
   }
 
-  // 3. Resposta de diagnóstico completo personalizado aos números reais da cobaia/usuário
+  // 4. Resposta de diagnóstico completo personalizado aos números reais da cobaia/usuário
   return {
-    reply: `📊 **Diagnóstico Personalizado para seu Salário de R$ ${profile.monthlyIncome.toLocaleString('pt-BR')}:**\n\nVocê está no **${diagnosis.maturityTitle}**.\n\n- **Regra #1 (Dia ${profile.payday} — Dia do Pagamento):** Transfira imediatamente **R$ ${diagnosis.payYourselfFirstAmount.toLocaleString('pt-BR')}** para sua Reserva/Liberdade antes de pagar boletos.\n- **Reserva da Paz (6 meses):** Meta de R$ ${diagnosis.emergencyFundTarget.toLocaleString('pt-BR')} (**${diagnosis.emergencyFundProgress.toFixed(1)}% concluída**).\n- **Número da Independência (FIRE):** R$ ${diagnosis.fireNumber.toLocaleString('pt-BR')} (gera R$ ${profile.targetMonthlyIncome.toLocaleString('pt-BR')}/mês livres de inflação para sempre).\n- **Tempo Estimado no Ritmo Atual:** **${diagnosis.yearsToIndependence} anos** (e se você redirecionar +10% do salário, antecipa em **${diagnosis.yearsSavedWithExtra10Percent} anos**!).\n\n💬 *Dica rápida: Você pode me mandar mensagens como "Gastei 65 no mercado" ou "Investi 300 no Tesouro Selic" que eu lanço automaticamente nos seus potes!*`,
+    reply: `📊 **Diagnóstico Personalizado para seu Salário de R$ ${profile.monthlyIncome.toLocaleString('pt-BR')}:**\n\nVocê está no **${diagnosis.maturityTitle}**.\n\n- **Regra #1 (Dia ${profile.payday} — Dia do Pagamento):** Transfira imediatamente **R$ ${diagnosis.payYourselfFirstAmount.toLocaleString('pt-BR')}** para sua Reserva/Liberdade antes de pagar boletos.\n- **Reserva da Paz (6 meses):** Meta de R$ ${diagnosis.emergencyFundTarget.toLocaleString('pt-BR')} (**${diagnosis.emergencyFundProgress.toFixed(1)}% concluída**).\n- **Número da Independência (FIRE):** R$ ${diagnosis.fireNumber.toLocaleString('pt-BR')} (gera R$ ${profile.targetMonthlyIncome.toLocaleString('pt-BR')}/mês livres de inflação para sempre).\n- **Tempo Estimado no Ritmo Atual:** **${diagnosis.yearsToIndependence} anos** (e se você redirecionar +10% do salário, antecipa em **${diagnosis.yearsSavedWithExtra10Percent} anos**!).\n\n💬 *Dica rápida: Você pode me perguntar coisas como "Preciso me organizar para comprar um carro de 45.000, como faço?" ou registrar gastos dizendo "Gastei 65 no mercado"!*`,
   };
 }
