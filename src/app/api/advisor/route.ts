@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { generateAdvisorResponse } from '@/lib/ai-advisor';
 import { FinancialProfile, TransactionItem } from '@/lib/financial-engine';
+import { prisma } from '@/lib/prisma';
+
+const DEFAULT_ADMIN_EMAIL = 'admin@sisfin.com.br';
 
 export async function POST(req: NextRequest) {
   try {
@@ -19,8 +22,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Mensagem e perfil financeiro são obrigatórios.' }, { status: 400 });
     }
 
-    // Primeiro processa se há registro de transação natural (ex: "Gastei 50 no mercado")
+    // Processa se há registro de transação natural (ex: "Gastei 50 no mercado")
     const localResult = await generateAdvisorResponse(message, profile, transactions || []);
+    let finalReply = localResult.reply;
 
     // Se houver chave OPENAI_API_KEY configurada na Railway e não for apenas um lançamento rápido, enriquece via LLM
     const openAiKey = process.env.OPENAI_API_KEY;
@@ -55,10 +59,7 @@ Responda de forma acolhedora, prática, direta e com cálculos reais em Reais (R
           const data = await aiRes.json();
           const llmReply = data.choices?.[0]?.message?.content;
           if (llmReply) {
-            return NextResponse.json({
-              reply: llmReply,
-              addedTransaction: localResult.addedTransaction,
-            });
+            finalReply = llmReply;
           }
         }
       } catch (err) {
@@ -66,7 +67,54 @@ Responda de forma acolhedora, prática, direta e com cálculos reais em Reais (R
       }
     }
 
-    return NextResponse.json(localResult);
+    // Persiste a conversa e eventual transação diretamente no PostgreSQL da Railway
+    try {
+      const user = await prisma.user.findUnique({
+        where: { email: profile.email || DEFAULT_ADMIN_EMAIL },
+      });
+
+      if (user) {
+        await prisma.advisorMessage.createMany({
+          data: [
+            { userId: user.id, role: 'user', content: message },
+            {
+              userId: user.id,
+              role: 'assistant',
+              content: finalReply,
+              actionTag: localResult.addedTransaction ? 'TRANSACTION_ADDED' : null,
+            },
+          ],
+        });
+
+        if (localResult.addedTransaction) {
+          const added = localResult.addedTransaction;
+          await prisma.transaction.create({
+            data: {
+              userId: user.id,
+              description: added.description,
+              amount: added.amount,
+              type: added.type,
+              category: added.category,
+              source: 'AI_CHAT',
+            },
+          });
+
+          if (added.type === 'INVESTMENT') {
+            await prisma.user.update({
+              where: { id: user.id },
+              data: { currentInvested: { increment: added.amount } },
+            });
+          }
+        }
+      }
+    } catch (dbErr) {
+      console.error('Erro ao persistir mensagem do consultor no PostgreSQL:', dbErr);
+    }
+
+    return NextResponse.json({
+      reply: finalReply,
+      addedTransaction: localResult.addedTransaction,
+    });
   } catch (error) {
     console.error('Erro na API do Consultor:', error);
     return NextResponse.json({ error: 'Falha ao processar consultoria financeira.' }, { status: 500 });

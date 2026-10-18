@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   TrendingUp,
   ShieldCheck,
@@ -25,6 +25,9 @@ import {
   RefreshCw,
   DollarSign,
   Calendar,
+  Database,
+  Trash2,
+  Save,
 } from 'lucide-react';
 import {
   FinancialProfile,
@@ -49,59 +52,6 @@ const INITIAL_PROFILE: FinancialProfile = {
   annualRealYield: 0.06,
 };
 
-const INITIAL_TRANSACTIONS: TransactionItem[] = [
-  {
-    id: 'tx-1',
-    description: 'Salário Mensal Recebido',
-    amount: 4200,
-    type: 'INCOME',
-    category: 'Renda / Salário',
-    potType: 'FREEDOM_INVEST',
-    source: 'MANUAL',
-    date: '2026-10-05',
-  },
-  {
-    id: 'tx-2',
-    description: 'Aporte Pague-se 1º (Tesouro Selic)',
-    amount: 630,
-    type: 'INVESTMENT',
-    category: 'Investimento & Reserva',
-    potType: 'FREEDOM_INVEST',
-    source: 'AI_CHAT',
-    date: '2026-10-05',
-  },
-  {
-    id: 'tx-3',
-    description: 'Aluguel + Condomínio + Internet',
-    amount: 1450,
-    type: 'EXPENSE',
-    category: 'Custo Essencial',
-    potType: 'ESSENTIAL',
-    source: 'MANUAL',
-    date: '2026-10-07',
-  },
-  {
-    id: 'tx-4',
-    description: 'Supermercado Mensal Atacadão',
-    amount: 620,
-    type: 'EXPENSE',
-    category: 'Custo Essencial',
-    potType: 'ESSENTIAL',
-    source: 'WHATSAPP',
-    date: '2026-10-12',
-  },
-  {
-    id: 'tx-5',
-    description: 'Jantar Fim de Semana & Cinema',
-    amount: 165,
-    type: 'EXPENSE',
-    category: 'Estilo de Vida & Lazer',
-    potType: 'LIFESTYLE',
-    source: 'AI_CHAT',
-    date: '2026-10-16',
-  },
-];
-
 interface ChatMsg {
   id: string;
   role: 'user' | 'assistant';
@@ -114,18 +64,14 @@ export default function SisfinApp() {
     'dashboard'
   );
   const [profile, setProfile] = useState<FinancialProfile>(INITIAL_PROFILE);
-  const [transactions, setTransactions] = useState<TransactionItem[]>(INITIAL_TRANSACTIONS);
+  const [transactions, setTransactions] = useState<TransactionItem[]>([]);
   const [extraSavingsSim, setExtraSavingsSim] = useState<number>(200);
+  const [dbSynced, setDbSynced] = useState<boolean>(false);
+  const [isSavingProfile, setIsSavingProfile] = useState<boolean>(false);
+  const [saveBanner, setSaveBanner] = useState<string | null>(null);
 
   // Estado do Consultor IA
-  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([
-    {
-      id: 'welcome-1',
-      role: 'assistant',
-      content: `Olá, **${INITIAL_PROFILE.name}**! Sou seu Consultor Financeiro Sisfin.\n\nEstou calibrado para te levar à **Independência Financeira** com o salário que você ganha hoje (**R$ ${INITIAL_PROFILE.monthlyIncome.toLocaleString('pt-BR')}**).\n\n💡 **Experimente agora:**\n- Digite *"Gastei 55 na farmácia"* ou *"Investi 300 no CDB"* para eu registrar nos seus Potes.\n- Ou pergunte: *"Posso comprar um notebook de R$ 2800 esse mês?"*`,
-      timestamp: 'Agora',
-    },
-  ]);
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [isSendingChat, setIsSendingChat] = useState(false);
 
@@ -134,6 +80,44 @@ export default function SisfinApp() {
   const [newTxAmount, setNewTxAmount] = useState('');
   const [importFeedback, setImportFeedback] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Carrega dados reais do PostgreSQL na Railway ao iniciar
+  useEffect(() => {
+    async function loadFromPostgres() {
+      try {
+        const res = await fetch('/api/state');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.profile) setProfile(data.profile);
+          if (data.transactions) setTransactions(data.transactions);
+          if (data.messages && data.messages.length > 0) setChatMessages(data.messages);
+          setDbSynced(true);
+        }
+      } catch (err) {
+        console.error('Erro ao sincronizar com PostgreSQL:', err);
+      }
+    }
+    loadFromPostgres();
+  }, []);
+
+  // Salva alterações do Perfil/Salário no PostgreSQL
+  async function handleSaveProfileToDb(customProfile?: FinancialProfile) {
+    const target = customProfile || profile;
+    setIsSavingProfile(true);
+    try {
+      const res = await fetch('/api/state', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile: target }),
+      });
+      if (res.ok) {
+        setSaveBanner('✅ Dados salvos com sucesso no PostgreSQL da Railway!');
+        setTimeout(() => setSaveBanner(null), 4000);
+      }
+    } finally {
+      setIsSavingProfile(false);
+    }
+  }
 
   // Diagnóstico calculado em tempo real
   const diagnosis = useMemo(
@@ -152,7 +136,7 @@ export default function SisfinApp() {
     return Number((months / 12).toFixed(1));
   }, [profile, diagnosis, extraSavingsSim]);
 
-  // Enviar mensagem no Chat do Consultor
+  // Enviar mensagem no Chat do Consultor (Persiste no PostgreSQL via /api/advisor)
   async function handleSendAdvisorMessage(e?: React.FormEvent, customText?: string) {
     if (e) e.preventDefault();
     const textToSend = (customText ?? chatInput).trim();
@@ -225,8 +209,8 @@ export default function SisfinApp() {
     }
   }
 
-  // Adicionar transação manual
-  function handleManualAddTransaction(e: React.FormEvent) {
+  // Adicionar transação manual e gravar no PostgreSQL
+  async function handleManualAddTransaction(e: React.FormEvent) {
     e.preventDefault();
     const val = parseFloat(newTxAmount.replace(',', '.'));
     if (!newTxDesc.trim() || isNaN(val) || val <= 0) return;
@@ -249,9 +233,21 @@ export default function SisfinApp() {
     }
     setNewTxDesc('');
     setNewTxAmount('');
+
+    await fetch('/api/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transaction: item }),
+    });
   }
 
-  // Importar arquivo OFX / CSV
+  // Excluir transação do PostgreSQL
+  async function handleDeleteTransaction(id: string) {
+    setTransactions((prev) => prev.filter((t) => t.id !== id));
+    await fetch(`/api/state?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  // Importar arquivo OFX / CSV e persistir lote no PostgreSQL
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -259,7 +255,12 @@ export default function SisfinApp() {
     const imported = parseBankStatementFile(content, file.name);
     if (imported.length > 0) {
       setTransactions((prev) => [...imported, ...prev]);
-      setImportFeedback(`✅ ${imported.length} lançamentos importados e classificados nos Potes com sucesso!`);
+      await fetch('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transactions: imported }),
+      });
+      setImportFeedback(`✅ ${imported.length} lançamentos importados e salvos no PostgreSQL da Railway!`);
     } else {
       setImportFeedback('⚠️ Nenhum lançamento válido encontrado neste arquivo. Use OFX ou CSV padrão.');
     }
@@ -289,6 +290,10 @@ export default function SisfinApp() {
                 <span className="text-[11px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
                   Consultor IA • SaaS
                 </span>
+                <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-400 border border-blue-500/30 flex items-center gap-1">
+                  <Database className="w-3 h-3" />
+                  {dbSynced ? 'PostgreSQL Railway Online' : 'Sincronizando...'}
+                </span>
               </div>
               <p className="text-xs text-slate-400">
                 Independência Financeira para Qualquer Salário
@@ -300,7 +305,7 @@ export default function SisfinApp() {
           <nav className="flex items-center gap-1 bg-slate-950/80 p-1 rounded-xl border border-slate-800 overflow-x-auto">
             <button
               onClick={() => setActiveTab('dashboard')}
-              className={`px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition flex items-center gap-1.5 ${
+              className={`px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition flex items-center gap-1.5 cursor-pointer ${
                 activeTab === 'dashboard'
                   ? 'bg-emerald-500 text-slate-950 font-semibold shadow-sm'
                   : 'text-slate-400 hover:text-white'
@@ -311,7 +316,7 @@ export default function SisfinApp() {
             </button>
             <button
               onClick={() => setActiveTab('advisor')}
-              className={`px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition flex items-center gap-1.5 ${
+              className={`px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition flex items-center gap-1.5 cursor-pointer ${
                 activeTab === 'advisor'
                   ? 'bg-emerald-500 text-slate-950 font-semibold shadow-sm'
                   : 'text-slate-400 hover:text-white'
@@ -322,7 +327,7 @@ export default function SisfinApp() {
             </button>
             <button
               onClick={() => setActiveTab('transactions')}
-              className={`px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition flex items-center gap-1.5 ${
+              className={`px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition flex items-center gap-1.5 cursor-pointer ${
                 activeTab === 'transactions'
                   ? 'bg-emerald-500 text-slate-950 font-semibold shadow-sm'
                   : 'text-slate-400 hover:text-white'
@@ -333,7 +338,7 @@ export default function SisfinApp() {
             </button>
             <button
               onClick={() => setActiveTab('calibration')}
-              className={`px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition flex items-center gap-1.5 ${
+              className={`px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition flex items-center gap-1.5 cursor-pointer ${
                 activeTab === 'calibration'
                   ? 'bg-emerald-500 text-slate-950 font-semibold shadow-sm'
                   : 'text-slate-400 hover:text-white'
@@ -344,7 +349,7 @@ export default function SisfinApp() {
             </button>
             <button
               onClick={() => setActiveTab('saas_admin')}
-              className={`px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition flex items-center gap-1.5 ${
+              className={`px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition flex items-center gap-1.5 cursor-pointer ${
                 activeTab === 'saas_admin'
                   ? 'bg-amber-400 text-slate-950 font-semibold shadow-sm'
                   : 'text-amber-400/80 hover:text-amber-300'
@@ -505,7 +510,7 @@ export default function SisfinApp() {
                   </div>
                   <button
                     onClick={() => setActiveTab('calibration')}
-                    className="text-xs text-emerald-400 hover:underline flex items-center gap-1"
+                    className="text-xs text-emerald-400 hover:underline flex items-center gap-1 cursor-pointer"
                   >
                     <Settings className="w-3.5 h-3.5" /> Ajustar Renda
                   </button>
@@ -659,7 +664,7 @@ export default function SisfinApp() {
                   <div>
                     <h2 className="text-sm font-bold text-white">Consultor Financeiro IA Sisfin</h2>
                     <p className="text-[11px] text-emerald-400">
-                      Conectado aos seus Potes • Registra gastos por conversa e analisa compras
+                      Sincronizado com PostgreSQL na Railway • Registra gastos por conversa
                     </p>
                   </div>
                 </div>
@@ -693,7 +698,7 @@ export default function SisfinApp() {
                 {isSendingChat && (
                   <div className="text-xs text-slate-400 flex items-center gap-2">
                     <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-400" />
-                    Consultor analisando seus números...
+                    Consultor analisando e gravando no banco...
                   </div>
                 )}
               </div>
@@ -728,7 +733,7 @@ export default function SisfinApp() {
                 Comandos Rápidos (Teste como Cobaia)
               </h3>
               <p className="text-xs text-slate-400">
-                Clique em qualquer exemplo abaixo para testar a inteligência do consultor:
+                Clique em qualquer exemplo abaixo para testar e salvar no banco da Railway:
               </p>
               <div className="space-y-2.5">
                 {[
@@ -790,7 +795,7 @@ export default function SisfinApp() {
                     type="submit"
                     className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs transition cursor-pointer"
                   >
-                    Classificar com IA & Salvar
+                    Classificar com IA & Salvar no Banco
                   </button>
                 </div>
               </form>
@@ -802,7 +807,7 @@ export default function SisfinApp() {
                   Importar Extrato (OFX / CSV)
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Envie o extrato do Nubank, Itaú, Inter, BB ou C6. A IA classifica cada gasto nos seus Potes automaticamente.
+                  Envie o extrato do Nubank, Itaú, Inter, BB ou C6. A IA classifica e salva no PostgreSQL.
                 </p>
                 <input
                   ref={fileInputRef}
@@ -831,7 +836,7 @@ export default function SisfinApp() {
             <div className="lg:col-span-2 bg-slate-900/90 border border-slate-800 rounded-2xl p-5 space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-base font-bold text-white">
-                  Histórico Inteligente ({transactions.length} lançamentos)
+                  Histórico no Banco ({transactions.length} lançamentos)
                 </h3>
                 <span className="text-xs text-emerald-400">
                   Total Investido no Mês: R$ {totalInvestedMonth.toLocaleString('pt-BR')}
@@ -875,17 +880,27 @@ export default function SisfinApp() {
                         </div>
                       </div>
                     </div>
-                    <span
-                      className={`text-sm font-bold ${
-                        tx.type === 'INCOME'
-                          ? 'text-emerald-400'
-                          : tx.type === 'INVESTMENT'
-                          ? 'text-teal-400'
-                          : 'text-slate-200'
-                      }`}
-                    >
-                      {tx.type === 'EXPENSE' ? '-' : '+'} R$ {tx.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                    </span>
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={`text-sm font-bold ${
+                          tx.type === 'INCOME'
+                            ? 'text-emerald-400'
+                            : tx.type === 'INVESTMENT'
+                            ? 'text-teal-400'
+                            : 'text-slate-200'
+                        }`}
+                      >
+                        {tx.type === 'EXPENSE' ? '-' : '+'} R${' '}
+                        {tx.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                      </span>
+                      <button
+                        onClick={() => handleDeleteTransaction(tx.id)}
+                        title="Excluir lançamento"
+                        className="text-slate-600 hover:text-rose-400 transition cursor-pointer"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -896,14 +911,31 @@ export default function SisfinApp() {
         {/* ABA 4: CALIBRAGEM DE SALÁRIO & METAS (QUALQUER RENDA) */}
         {activeTab === 'calibration' && (
           <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 max-w-3xl mx-auto space-y-6">
-            <div>
-              <h2 className="text-lg font-bold text-white">
-                Calibrar Realidade Financeira (Qualquer Salário)
-              </h2>
-              <p className="text-xs text-slate-400">
-                Altere seu salário, custo fixo ou dívidas abaixo e veja os Potes e o Plano de Independência se adaptarem instantaneamente.
-              </p>
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-bold text-white">
+                  Calibrar Realidade Financeira (Qualquer Salário)
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Altere seu salário, custo fixo ou dívidas abaixo e salve direto no PostgreSQL da Railway.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={isSavingProfile}
+                onClick={() => handleSaveProfileToDb()}
+                className="px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <Save className="w-4 h-4" />
+                <span>{isSavingProfile ? 'Salvando...' : 'Salvar no Banco Railway'}</span>
+              </button>
             </div>
+
+            {saveBanner && (
+              <div className="p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-xs text-emerald-300 font-medium">
+                {saveBanner}
+              </div>
+            )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
@@ -999,7 +1031,7 @@ export default function SisfinApp() {
               </div>
             </div>
 
-            <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-between">
+            <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold text-emerald-300">
                   Teste perfis diferentes como Cobaia:
@@ -1011,8 +1043,8 @@ export default function SisfinApp() {
               <div className="flex gap-2">
                 <button
                   type="button"
-                  onClick={() =>
-                    setProfile({
+                  onClick={() => {
+                    const next = {
                       ...profile,
                       monthlyIncome: 1518,
                       essentialFixedCosts: 1100,
@@ -1020,16 +1052,18 @@ export default function SisfinApp() {
                       totalDebt: 0,
                       monthlyDebtPayment: 0,
                       targetMonthlyIncome: 1518,
-                    })
-                  }
+                    };
+                    setProfile(next);
+                    handleSaveProfileToDb(next);
+                  }}
                   className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-white cursor-pointer"
                 >
                   Simular 1 Salário Mínimo
                 </button>
                 <button
                   type="button"
-                  onClick={() =>
-                    setProfile({
+                  onClick={() => {
+                    const next = {
                       ...profile,
                       monthlyIncome: 3500,
                       essentialFixedCosts: 2000,
@@ -1037,8 +1071,10 @@ export default function SisfinApp() {
                       totalDebt: 4800,
                       monthlyDebtPayment: 450,
                       targetMonthlyIncome: 3500,
-                    })
-                  }
+                    };
+                    setProfile(next);
+                    handleSaveProfileToDb(next);
+                  }}
                   className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-xs text-amber-300 border border-amber-500/30 cursor-pointer"
                 >
                   Simular Com Dívidas
@@ -1060,7 +1096,7 @@ export default function SisfinApp() {
                     Infraestrutura SaaS & Deploy
                   </h3>
                   <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400">
-                    Pronto p/ Produção
+                    PostgreSQL Conectado
                   </span>
                 </div>
                 <div className="space-y-2 text-xs text-slate-300 bg-slate-950 p-3.5 rounded-xl border border-slate-800">
@@ -1073,8 +1109,8 @@ export default function SisfinApp() {
                     <span className="text-emerald-400">financas-financas.up.railway.app</span>
                   </p>
                   <p>
-                    <strong className="text-slate-400">Healthcheck Endpoint:</strong>{' '}
-                    <code className="text-amber-300">/api/health</code>
+                    <strong className="text-slate-400">Host Banco Railway:</strong>{' '}
+                    <code className="text-blue-400">caboose.proxy.rlwy.net:40032</code>
                   </p>
                 </div>
               </div>
